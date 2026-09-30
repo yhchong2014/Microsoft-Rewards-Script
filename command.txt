@@ -1,0 +1,188 @@
+================================================================================
+MICROSOFT REWARDS SCRIPT — NAS COMMAND REFERENCE
+================================================================================
+CONTEXT (for AI assistants reading this file):
+
+- Device:        NAS (hostname YHNAS), Docker + Docker Compose installed
+- Project path:  /vol1/1000/Docker/Microsoft rewards   (path contains a SPACE —
+                 always wrap in double quotes in shell commands)
+- Repo:          fork of chiihero/Microsoft-Rewards-Script
+                 origin: https://github.com/yhchong2014/Microsoft-Rewards-Script
+                 upstream (author): https://github.com/chiihero/Microsoft-Rewards-Script
+- Branch:        V4-china  (script version 4.3.2.3+)
+- Accounts:      configured in .env (ACCOUNT_1_EMAIL ... ACCOUNT_N_*),
+                 auto-loaded via env_file in compose.yaml — account slots do NOT
+                 need to be uncommented in compose.yaml (that was the old v3 way)
+- Data that survives rebuilds: ./config/ and ./sessions/ (mount volumes)
+- .env / sessions/ / config/ are untracked or ignored — git operations do not
+  touch them
+- NAS QUIRK:     this NAS strips the Unix exec bit on files written by git
+                 (core.filemode=false-like behavior). After git pull / checkout,
+                 shell scripts lose +x. Fix = chmod +x scripts/docker/*.sh AND a
+                 RUN chmod 755 line in the Dockerfile (see PATCHES section).
+- Schedule:      cron inside container, default 0 7 * * * (daily 07:00),
+                 RUN_ON_START=true (runs once immediately on container start)
+- Search config: CONFIG_SEARCH_QUERY_ENGINES='china,local', Visual search on:
+                 CONFIG_WORKER_VISUAL_SEARCH='true'
+
+================================================================================
+1. UPDATE ROUTINE (after author pushes new commits)
+================================================================================
+
+STEP A — on github.com (web browser):
+  1. Open https://github.com/yhchong2014/Microsoft-Rewards-Script
+  2. If banner says "This branch is X commits behind chiihero/Microsoft-Rewards-Script",
+     click "Sync fork" -> "Update branch"
+
+STEP B — on the NAS (SSH):
+
+cd "/vol1/1000/Docker/Microsoft rewards"
+git stash
+git pull
+git stash pop
+chmod +x scripts/docker/*.sh
+docker compose up -d --build
+docker compose logs -f
+
+NOTES:
+- --build is MANDATORY after code changes; without it the old image runs.
+- If `git stash pop` reports a conflict on Dockerfile or compose.yaml:
+    git checkout --theirs Dockerfile compose.yaml
+    (then re-apply the patches from the PATCHES section below)
+- If startup fails with:
+    exec: "/usr/local/bin/entrypoint.sh": permission denied
+  -> exec-bit quirk again. Fix:
+    chmod +x scripts/docker/*.sh
+    (re-apply Dockerfile patch below if missing)
+    docker compose build --no-cache && docker compose up -d
+
+================================================================================
+2. EVERYDAY COMMANDS
+================================================================================
+
+cd "/vol1/1000/Docker/Microsoft rewards"
+
+docker compose up -d --build     # rebuild + restart (after code/compose changes)
+docker compose up -d             # apply .env / compose env changes (recreate, no rebuild)
+docker compose restart           # restart container (also triggers a run, since RUN_ON_START=true)
+docker compose logs -f           # live logs (Ctrl+C to exit)
+docker compose logs --tail 100   # last 100 lines
+docker compose down              # stop and remove container
+docker compose ps                # status / healthcheck
+
+# Trigger a manual run WITHOUT restarting the container:
+docker compose exec microsoft-rewards-script bash -c 'SKIP_RANDOM_SLEEP=true scripts/docker/run_daily.sh'
+
+# Raw one-off run (no lock, no wrapper):
+docker compose exec microsoft-rewards-script npm start
+
+# Verify which accounts are loaded (should list ACCOUNT_N_EMAIL values):
+docker compose exec microsoft-rewards-script printenv | grep ACCOUNT
+
+# Export logs to a file (docker logs only reach back to last container recreate):
+docker compose logs --timestamps > "log-$(date +%Y%m%d-%H%M).txt"
+docker compose logs --tail 2000 > log-recent.txt
+
+# Watch only daily-set / activity related lines:
+docker compose logs -f | grep -iE "daily|每日|活动|VISUAL-SEARCH|ACCOUNT-END|RUN-END"
+
+# Container-internal accumulated log file:
+docker compose cp microsoft-rewards-script:/usr/src/microsoft-rewards-script/logs ./logs-export
+
+================================================================================
+3. ADDING AN ACCOUNT
+================================================================================
+
+Accounts live ONLY in .env (loaded via env_file — no compose.yaml editing needed):
+
+nano "/vol1/1000/Docker/Microsoft rewards/.env"
+
+Add / uncomment a consecutive block (v4 tolerates gaps, but keep numbers tidy):
+
+ACCOUNT_5_EMAIL=newaccount@example.com
+ACCOUNT_5_PASSWORD=the_password
+#ACCOUNT_5_TOTP_SECRET=          # only if 2FA is enabled on the account
+
+Then apply:
+
+cd "/vol1/1000/Docker/Microsoft rewards"
+docker compose up -d
+docker compose logs | grep -i "account"     # confirm new account count
+
+.env VALUE RULES:
+- No quotes needed for normal values: ACCOUNT_1_PASSWORD=myPass123
+- Quote values containing # or spaces: ACCOUNT_1_PASSWORD="pa#ss word"
+- $$ escapes a dollar sign: pa$$word  (or use single quotes: 'pa$$word')
+- Inline comments on ACTIVE lines are risky on some parsers — prefer a comment
+  line above the variable.
+
+PASSWORDLESS ACCOUNTS: if login fails with "密码登录不可用 / password sign-in
+is not available", the account has no password set. Fix at
+account.microsoft.com -> Security -> Advanced security options -> add password.
+(v4 also supports passwordless login natively, but a password is more hands-off.)
+
+================================================================================
+4. PATCHES APPLIED TO THIS DEPLOYMENT (re-apply if lost after conflicts)
+================================================================================
+
+PATCH 1 — Dockerfile exec-bit hardening (guards against the NAS exec-bit quirk).
+In the runtime stage, AFTER the line:
+    COPY scripts/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+add a new line:
+    RUN chmod 755 /usr/local/bin/entrypoint.sh ./scripts/docker/*.sh
+
+One-liner to apply it:
+
+cd "/vol1/1000/Docker/Microsoft rewards"
+grep -q "RUN chmod 755 /usr/local/bin/entrypoint.sh" Dockerfile || \
+sed -i 's|^COPY --chmod=755 scripts/docker/entrypoint.sh /usr/local/bin/entrypoint.sh|COPY scripts/docker/entrypoint.sh /usr/local/bin/entrypoint.sh\nRUN chmod 755 /usr/local/bin/entrypoint.sh ./scripts/docker/*.sh|' Dockerfile
+
+(Better long-term: commit this change to the fork on github.com via the web
+editor so it survives every sync.)
+
+PATCH 2 — compose.yaml environment overrides currently enabled:
+
+  CONFIG_WORKER_VISUAL_SEARCH: 'true'
+  CONFIG_SEARCH_QUERY_ENGINES: 'china,local'
+
+================================================================================
+5. SESSIONS & BACKUP
+================================================================================
+
+- Login cookies:  /vol1/1000/Docker/Microsoft rewards/sessions/
+  ONE FOLDER PER ACCOUNT (session_mobile.json / session_desktop.json).
+  BACK THIS UP. If lost, every account must do a fresh password login.
+- A single account's desktop session going stale (Bing searches earn 0 points,
+  login.live.com EMAIL_INPUT loops during Bing session verification) can be
+  fixed by deleting just that desktop file and letting it re-login:
+    docker compose down
+    rm "sessions/ACCOUNT_EMAIL/session_desktop.json"
+    docker compose up -d
+
+================================================================================
+6. ROLLBACK / DISASTER RECOVERY
+================================================================================
+
+If an update breaks the script, rebuild from the last known-good state:
+
+cd "/vol1/1000/Docker/Microsoft rewards"
+docker compose down
+git reflog                       # find the previous commit hash (e.g. abc1234)
+git reset --hard abc1234
+chmod +x scripts/docker/*.sh
+docker compose up -d --build
+
+(.env, sessions/, config/ are never touched by git operations.)
+
+================================================================================
+7. QUICK HEALTH CHECKLIST
+================================================================================
+
+- Container healthy:            docker compose ps
+- Version line in logs:         docker compose logs | grep RUN-START
+- Accounts loaded:              docker compose logs | grep -m1 "account(s)"
+- Logins reuse sessions:        look for "登录成功" shortly after ACCOUNT-START
+- Daily set actually earning:   no repeated "在面板数据中未找到活动" /
+                                "dashboard did not render" errors
+- Points summary per account:   docker compose logs | grep ACCOUNT-END
+================================================================================
